@@ -2,21 +2,8 @@
 mystery-docs: Auto-generated 7-10 min documentary videos about unexplained
 historical mysteries, strange phenomena, and lost places.
 
-Daily pipeline:
-  1. Discover candidate mysteries from Reddit (UnresolvedMysteries, AskHistorians,
-     HighStrangeness) + Wikipedia "Unexplained phenomena" / "Mysteries" categories
-  2. Filter out content that triggers YouTube demonetization (recent crime,
-     violence, real-living-people conspiracies)
-  3. Gemini ranks safe candidates and picks the most "video-worthy" one
-  4. Gemini writes a slow-burn cinematic narration (~1100 words = 7-8 min)
-  5. edge-tts narrates with deep storyteller voice
-  6. For each ~10s segment, Gemini extracts a moody Pexels query
-  7. Pexels API fetches atmospheric stock footage
-  8. FFmpeg assembles 1920x1080 with bouncy captions and dark BGM
-  9. YouTube uploads as Public, History/Education category
-
-Required env vars: GEMINI_API_KEY, PEXELS_API_KEY, YT_CLIENT_ID,
-YT_CLIENT_SECRET, YT_REFRESH_TOKEN
+Upgraded with YouTube Creator optimizations: Cinematic grading, audio ducking,
+retention-focused script prompts, and modern typography.
 """
 
 from __future__ import annotations
@@ -52,8 +39,10 @@ CONFIG_FILE = ROOT / "config.yaml"
 # ----------------------------- config + state -----------------------------
 
 def load_config() -> dict:
-    with CONFIG_FILE.open() as f:
-        return yaml.safe_load(f)
+    if CONFIG_FILE.exists():
+        with CONFIG_FILE.open() as f:
+            return yaml.safe_load(f) or {}
+    return {}
 
 def load_state() -> dict:
     if STATE_FILE.exists():
@@ -65,8 +54,6 @@ def save_state(state: dict) -> None:
 
 # ----------------------------- safety filter -----------------------------
 
-# Words that strongly indicate content YouTube will demonetize or strike.
-# Flattened to a single line to prevent web-editor copy-paste bugs.
 DEMONETIZATION_BLOCKLIST = re.compile(
     r"\b(murder|murdered|killer|killing|killed|massacre|rape|raped|assault|abuse|abused|missing\s+(child|girl|boy|teen)|kidnapp|abducted|suicide|self-?harm|jeffrey\s+epstein|harvey\s+weinstein|madeleine\s+mccann|jonbenet|zodiac\s+killer|gary\s+ridgway|jeffrey\s+dahmer|ted\s+bundy|charles\s+manson|qanon|stop\s+the\s+steal|election\s+frau|anti-?vax|covid\s+conspirac|holocaust\s+denial|9/?11\s+inside\s+job)\b",
     re.I,
@@ -89,19 +76,26 @@ REDDIT_SUBS = [
     ("UnresolvedMysteries", "month"),
     ("AskHistorians", "month"),
     ("HighStrangeness", "month"),
-    ("UnsolvedMysteries", "month"),
-    ("conspiracy", "month"),  # filtered hard for safe topics only
     ("Lost_Architecture", "year"),
-    ("AbandonedPorn", "year"),
+]
+
+WIKI_CATEGORIES = [
+    "Unexplained_phenomena",
+    "Mysteries",
+    "Lost_cities",
+    "Cryptids",
+    "Unsolved_problems_in_archaeology",
+    "Hoaxes",
+    "Out-of-place_artifacts",
+    "Ancient_mysteries",
 ]
 
 def fetch_reddit(subreddit: str, period: str, limit: int = 25) -> list[TopicCandidate]:
-    """Top posts from a subreddit's public JSON. No API key needed."""
     out: list[TopicCandidate] = []
     try:
         resp = requests.get(
             f"https://www.reddit.com/r/{subreddit}/top.json?t={period}&limit={limit}",
-            headers={"User-Agent": "mystery-docs/1.0"},
+            headers={"User-Agent": "mystery-docs/2.0"},
             timeout=20,
         )
         if resp.status_code != 200:
@@ -125,23 +119,7 @@ def fetch_reddit(subreddit: str, period: str, limit: int = 25) -> list[TopicCand
         print(f"[warn] reddit /r/{subreddit} fetch failed: {e}", file=sys.stderr)
     return out
 
-# Wikipedia category members give us a HUGE evergreen pool. No API key needed.
-# These categories contain hundreds of mystery articles each.
-WIKI_CATEGORIES = [
-    "Unexplained_phenomena",
-    "Mysteries",
-    "Lost_cities",
-    "Cryptids",
-    "Unsolved_problems_in_archaeology",
-    "Hoaxes",
-    "Mysterious_disappearances",  # filtered for safe ones
-    "Out-of-place_artifacts",
-    "Ancient_mysteries",
-    "Anomalous_phenomena",
-]
-
 def fetch_wikipedia_category(category: str, limit: int = 50) -> list[TopicCandidate]:
-    """Wikipedia API: list pages in a category."""
     out: list[TopicCandidate] = []
     try:
         url = "https://en.wikipedia.org/w/api.php"
@@ -154,12 +132,12 @@ def fetch_wikipedia_category(category: str, limit: int = 50) -> list[TopicCandid
             "cmtype": "page",
         }
         resp = requests.get(url, params=params, timeout=20,
-                            headers={"User-Agent": "mystery-docs/1.0"})
+                            headers={"User-Agent": "mystery-docs/2.0"})
         if resp.status_code != 200:
             return out
         for m in resp.json().get("query", {}).get("categorymembers", []):
             title = m.get("title", "")
-            if not title or ":" in title:  # skip Talk: / File: pages
+            if not title or ":" in title:
                 continue
             if not is_safe(title):
                 continue
@@ -174,10 +152,9 @@ def fetch_wikipedia_category(category: str, limit: int = 50) -> list[TopicCandid
     return out
 
 def fetch_wikipedia_summary(title: str) -> str:
-    """Quick Wikipedia summary for context. Used before Gemini ranks."""
     try:
         url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{quote_plus(title.replace(' ', '_'))}"
-        r = requests.get(url, timeout=15, headers={"User-Agent": "mystery-docs/1.0"})
+        r = requests.get(url, timeout=15, headers={"User-Agent": "mystery-docs/2.0"})
         if r.status_code == 200:
             return (r.json().get("extract") or "")[:800]
     except Exception:
@@ -190,7 +167,6 @@ def gather_candidates(cfg: dict) -> list[TopicCandidate]:
         cands += fetch_reddit(sub, period, 25)
     for cat in cfg.get("wikipedia_categories", WIKI_CATEGORIES):
         cands += fetch_wikipedia_category(cat, 40)
-    # de-dupe by title
     seen: set[str] = set()
     deduped: list[TopicCandidate] = []
     for c in cands:
@@ -203,7 +179,6 @@ def gather_candidates(cfg: dict) -> list[TopicCandidate]:
 
 # ----------------------------- gemini helpers -----------------------------
 
-# FIX: Kept the Gemini client alive globally so httpx doesn't close the connection
 _GEMINI_CLIENT = None
 
 def _gemini():
@@ -225,26 +200,23 @@ def _gemini_json(prompt: str, *, temperature: float = 0.6) -> dict | list:
 
 # ----------------------------- topic selection -----------------------------
 
-PICK_PROMPT = """You're picking the next mystery documentary topic for a YouTube channel.
+PICK_PROMPT = """You are an elite YouTube strategist running a highly successful Mystery/Documentary channel (think Lemmino, Wendigoon, or MrBallen).
+Pick the most viral, click-worthy historical mystery from the list below.
 
-The CORRECT pick is:
-  - An unexplained historical event, lost place, ancient enigma, strange phenomenon, or weird disappearance from at least 30+ years ago (the older the safer)
-  - Self-contained: a viewer with zero context can follow a 7-min explainer
-  - Visually narratable with stock footage of: forests, oceans, ruins, old documents, candles, fog, mountains, ancient places, abandoned buildings
-  - NOT in the "already used" list below
-  - NOT about: recent murders, identifiable living people's crimes, missing children, modern conspiracy theories, COVID, elections, recent politics. We need topics that are atmospheric and old.
-
-Examples of strong picks: Roanoke Colony, the Dyatlov Pass incident, the Voynich Manuscript, the Antikythera Mechanism, the Wow! Signal, the Lost Colony, the Piri Reis Map, Tunguska event, lost city of Atlantis, the Nazca Lines, Easter Island moai, the Bog Bodies of Europe, the Phaistos Disc, the Aluxes of Mexico, the Great Emu War, the Princes in the Tower, the death of Tutankhamun, the disappearance of Amelia Earhart, the lost Roman legions, the Year Without a Summer.
+Rules for picking:
+1. It MUST have "curiosity gap" potential (an event so bizarre that viewers HAVE to know what happened).
+2. It must be visually narratable with atmospheric B-roll (ruins, oceans, documents, forests, creepy cabins).
+3. Avoid anything political, recent, or highly controversial. Stick to classic, eerie, unexplained history.
 
 Return STRICT JSON:
 {{
   "winner_index": <int>,
-  "topic": "<the topic title rewritten as a punchy headline, max 80 chars - e.g. 'What Happened to the Roanoke Colony?'>",
-  "angle": "<one sentence on the unique angle this video will take>",
-  "reason": "<one sentence on why this topic will perform>"
+  "topic": "<Rewrite the title to be a highly clickable, intriguing YouTube title (max 70 chars). E.g., 'The Lost City Nobody Can Find'>",
+  "angle": "<One sentence explaining the psychological hook of the story>",
+  "reason": "<One sentence explaining why this will get high viewer retention>"
 }}
 
-Already used (don't repeat or close paraphrase):
+Already used (DO NOT PICK):
 {used}
 
 Candidates (index | source | score | title):
@@ -259,15 +231,16 @@ def pick_topic(candidates: list[TopicCandidate], used_topics: list[str]) -> dict
         used="\n".join(f"- {t}" for t in used_topics[-100:]) or "(none yet)",
         candidates="\n".join(lines),
     )
-    pick = _gemini_json(prompt, temperature=0.5)
+    pick = _gemini_json(prompt, temperature=0.7)
     idx = int(pick["winner_index"])
     chosen = candidates[idx]
-    # If it's a Wikipedia article, fetch the summary as research material
+    
     research = ""
     if chosen.source.startswith("wikipedia/"):
         research = fetch_wikipedia_summary(chosen.title)
     elif chosen.summary:
         research = chosen.summary
+        
     return {
         "topic": pick["topic"],
         "angle": pick["angle"],
@@ -279,39 +252,29 @@ def pick_topic(candidates: list[TopicCandidate], used_topics: list[str]) -> dict
 
 # ----------------------------- script writing -----------------------------
 
-SCRIPT_PROMPT = """You are writing a documentary narration for a YouTube mystery channel.
+SCRIPT_PROMPT = """You are a master scriptwriter for a top-tier YouTube mystery channel. 
+Your goal is MAXIMUM AUDIENCE RETENTION. 
 
 Topic: {topic}
 Angle: {angle}
-Source title: {source_title}
+Factual Basis: {research}
 
-Research material (use as factual ground truth, don't just summarize):
-{research}
+Scripting Rules:
+1. THE HOOK (First 15 seconds): Start *in media res*. Describe a chilling sensory detail or the exact moment the mystery began. DO NOT say "Today we are looking at..."
+2. THE BUILD-UP: Treat the audience as intelligent. Feed them clues slowly. Use "open loops" (e.g., "But what they found inside made the situation infinitely worse.")
+3. PACING: Short, punchy sentences. Pause for effect. 
+4. NO FILLER: Zero fluff, zero "Make sure to subscribe" lines. 
+5. THE CLIMAX & OUTRO: Present the leading theories, but leave the audience with a lingering, unsettling question. 
+6. NO MARKDOWN. NO HEADERS. ONLY PLAIN PROSE.
 
-Voice and tone:
-  - Slow-burn cinematic. Like "Bedtime Stories" or "Lemmino" - calm, measured, ominous
-  - Builds atmosphere with concrete sensory details (the cold, the silence, the dim light)
-  - Treats the audience as intelligent. No "what would YOU have done" filler
-  - Never sensationalizes. Never says "you won't believe..." or "what they found will shock you"
-  - Slight wry detachment is welcome - this is a storyteller who's seen weirder things
-
-Constraints:
-  - Total length: {target_words} words (~{target_minutes} minutes at 150 wpm)
-  - Open with a hook in the first 2 sentences (a vivid scene or unsettling fact)
-  - 4-6 sections that escalate naturally. Use phrases like "But the strangest part was still to come" or "What happened next has never been satisfactorily explained"
-  - Include factually accurate details: dates, names, places, numbers
-  - End on an open question or unresolved note - never wrap with a definitive answer
-  - NO em-dashes (read poorly aloud)
-  - NO bullet points, headers, markdown
-  - NO references to "this video", "today", "subscribe", "let me know in the comments"
-  - DO NOT speculate wildly. Stick to documented theories. If the mystery has a most-likely mundane explanation, mention it but don't dismiss the strangeness
+Length: Exactly {target_words} words.
 
 Return STRICT JSON:
 {{
-  "narration": "<the full narration text, plain prose>",
-  "title": "<YouTube title, <=70 chars. Use formats like 'What Happened to X', 'The Strange Case of Y', 'Nobody Can Explain Z'. No clickbait emojis>",
-  "description": "<2-paragraph YouTube description, ~120 words, ending with 'Sources:' and the source URL>",
-  "tags": ["<10-12 lowercase tags relevant to mystery/history/unexplained>"]
+  "narration": "<The full, captivating narration text>",
+  "title": "<A viral, high-CTR YouTube title, max 65 chars>",
+  "description": "<A 2-paragraph compelling description, ending with 'Sources: {source_url}'>",
+  "tags": ["<15 highly relevant, high-search-volume tags>"]
 }}
 """
 
@@ -321,17 +284,16 @@ def write_script(picked: dict, target_minutes: float) -> dict:
         topic=picked["topic"],
         angle=picked["angle"],
         source_title=picked["source_title"],
-        research=picked.get("research", "(no additional research available)"),
+        research=picked.get("research", "(no research available)"),
         target_words=target_words,
-        target_minutes=target_minutes,
+        source_url=picked["source_url"]
     )
-    return _gemini_json(prompt, temperature=0.75)
+    return _gemini_json(prompt, temperature=0.85)
 
 # ----------------------------- TTS -----------------------------
 
 async def _synth_async(text: str, voice: str, out_path: Path, srt_path: Path) -> None:
-    # Slightly slower than default for storyteller pacing.
-    communicate = edge_tts.Communicate(text, voice, rate="-5%", boundary="WordBoundary")
+    communicate = edge_tts.Communicate(text, voice, rate="-8%", pitch="-2Hz", boundary="WordBoundary")
     submaker = edge_tts.SubMaker()
     with out_path.open("wb") as f:
         async for chunk in communicate.stream():
@@ -378,7 +340,8 @@ def parse_srt(path: Path) -> list[Cue]:
             cues.append(Cue(start, end, text))
     return cues
 
-def chunk_into_segments(cues: list[Cue], target_seconds: float = 10.0) -> list[Cue]:
+def chunk_into_segments(cues: list[Cue], target_seconds: float = 6.5) -> list[Cue]:
+    # Faster pacing for YouTube: Changed target from 10s to 6.5s
     if not cues:
         return []
     out: list[Cue] = []
@@ -402,22 +365,21 @@ def chunk_into_segments(cues: list[Cue], target_seconds: float = 10.0) -> list[C
 
 # ----------------------------- Pexels footage -----------------------------
 
-QUERY_PROMPT = """You are a documentary film director selecting B-roll stock footage for a mystery video.
-For each segment of the narration, provide a primary search query AND a fallback query.
+QUERY_PROMPT = """You are a Director of Photography selecting cinematic B-roll for a mystery documentary.
+For each narration segment, provide a highly specific search query AND a mood-based fallback.
 
-Rules for queries (2-4 words max):
-1. Be specific and literal to the subject matter when possible (e.g., "vintage newspaper", "police tape", "hoof prints", "old wooden ship", "compass on map").
-2. Only use atmospheric queries (e.g., "foggy pine trees", "stormy ocean cliff") if the segment is purely about mood.
-3. NEVER search for proper nouns or specific people (Pexels doesn't have "Abraham Lincoln" or "Dyatlov Pass"). Translate proper nouns into generic equivalents (e.g., "19th century man", "snowy mountain camp").
-4. The fallback query should be a slightly broader version of the primary query.
+Rules (2-4 words max):
+1. 'Primary' must be literal objects or places (e.g., "vintage map", "typewriter", "snowy tracks", "old wooden ship", "abandoned hospital").
+2. 'Fallback' must be a broader, highly atmospheric vibe (e.g., "dark fog", "stormy sea", "creepy shadows").
+3. DO NOT use proper nouns or character names. 
 
-Return STRICT JSON matching this structure exactly:
+Return STRICT JSON:
 {{"segments": [
-  {{"primary": "snowy mountain camp", "fallback": "winter blizzard"}},
-  {{"primary": "vintage newspaper", "fallback": "old paper documents"}}
+  {{"primary": "snowy mountain footprints", "fallback": "winter blizzard"}},
+  {{"primary": "old newspaper clipping", "fallback": "dusty library books"}}
 ]}}
 
-Narration Segments:
+Segments:
 {segments}
 """
 
@@ -431,8 +393,8 @@ def queries_for_segments(segments: list[Cue]) -> list[dict]:
     return qs[:len(segments)]
 
 PEXELS_FALLBACKS = [
-    "foggy forest", "ocean storm", "ancient ruins", "candle darkness",
-    "rain window", "abandoned building", "moonlit night", "old paper",
+    "foggy woods", "stormy ocean", "dusty library", "candlelight",
+    "rain window", "creepy abandoned building", "moonlight clouds", "old compass",
 ]
 
 def pexels_video_for_query(query: str, min_duration: float, key: str) -> str | None:
@@ -444,7 +406,6 @@ def pexels_video_for_query(query: str, min_duration: float, key: str) -> str | N
         if resp.status_code != 200:
             return None
         videos = resp.json().get("videos", [])
-        # Removed random shuffle to prioritize the MOST relevant result first
         for v in videos:
             if v.get("duration", 0) < min_duration:
                 continue
@@ -459,7 +420,7 @@ def pexels_video_for_query(query: str, min_duration: float, key: str) -> str | N
             if files:
                 return files[0].get("link")
     except Exception as e:
-        print(f"[warn] pexels search '{query}' failed: {e}", file=sys.stderr)
+        pass
     return None
 
 def download_clip(url: str, dest: Path) -> bool:
@@ -472,8 +433,7 @@ def download_clip(url: str, dest: Path) -> bool:
                     if chunk:
                         f.write(chunk)
         return dest.stat().st_size > 50_000
-    except Exception as e:
-        print(f"[warn] download failed: {e}", file=sys.stderr)
+    except Exception:
         return False
 
 def gather_footage(
@@ -486,9 +446,8 @@ def gather_footage(
         clip_path = footage_dir / f"seg_{i:03d}.mp4"
         url: str | None = None
         
-        # Try Primary, then AI Fallback, then Global Fallbacks
         search_list = [query_dict.get("primary", ""), query_dict.get("fallback", "")] + PEXELS_FALLBACKS
-        search_list = [q for q in search_list if q] # Remove empty strings
+        search_list = [q for q in search_list if q]
         
         for q in search_list:
             cand = pexels_video_for_query(q, duration, pexels_key)
@@ -501,35 +460,33 @@ def gather_footage(
             if paths:
                 shutil.copy(paths[-1], clip_path)
                 paths.append(clip_path)
-                print(f"    [{i}] no fresh clip; reused previous", file=sys.stderr)
                 continue
-            raise RuntimeError(f"No Pexels footage available for segment {i}")
+            raise RuntimeError(f"No footage available for segment {i}")
             
         if not download_clip(url, clip_path):
             if paths:
                 shutil.copy(paths[-1], clip_path)
                 paths.append(clip_path)
                 continue
-            raise RuntimeError(f"Failed to download Pexels clip for segment {i}")
+            raise RuntimeError(f"Failed download segment {i}")
             
         paths.append(clip_path)
-        print(f"    [{i+1}/{len(segments)}] '{search_list[0]}' -> {clip_path.name}")
+        print(f"      [{i+1}/{len(segments)}] Searched: '{search_list[0]}'")
         
     return paths
 
 # ----------------------------- captions (ASS) -----------------------------
 
-def build_caption_file(cues: list[Cue], out_path: Path, chunk_words: int = 4) -> None:
-    """Subtle storyteller-style captions. Smaller, less aggressive than tech-style."""
+def build_caption_file(cues: list[Cue], out_path: Path, chunk_words: int = 5) -> None:
+    # YouTube Creator Typography: Bold, Yellow, Center-Screen, Heavy Shadow
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1920
 PlayResY: 1080
-ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial Black,64,&H00FFFFFF,&H00000000,&H80000000,1,0,1,4,2,2,80,80,90,1
+Style: Default,Arial Black,75,&H0000FFFF,&H00000000,&H99000000,-1,0,1,3,4,5,80,80,120,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -558,10 +515,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 # ----------------------------- ffmpeg assembly -----------------------------
 
 def normalize_clip(src: Path, dst: Path, duration: float) -> None:
-    """Trim/loop src to exactly `duration` seconds, scaled to 1920x1080, no audio.
-    Slight darken filter to keep moody atmosphere consistent."""
-    # Flattened f-string to prevent editor parsing bugs
-    vf = f"scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,eq=brightness=-0.04:saturation=0.9,tpad=stop_mode=clone:stop_duration={duration}"
+    # Creator Visuals: High contrast, desaturated, slight grain/noise for grittiness
+    vf = f"scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,eq=brightness=-0.05:contrast=1.1:saturation=0.65,noise=alls=8:allf=t+u,tpad=stop_mode=clone:stop_duration={duration}"
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-stream_loop", "-1", "-i", str(src),
@@ -596,8 +551,8 @@ def mux_final(
     vf = f"ass={captions_ass.as_posix()}"
 
     if bgm and bgm.exists():
-        # Flattened f-string to prevent editor parsing bugs
-        filter_complex = f"[0:v]{vf}[v];[1:a]volume=1.0[a1];[2:a]volume=0.08[a2];[a1][a2]amix=inputs=2:duration=first:dropout_transition=2[a]"
+        # Creator Audio: BGM ducks down to 3% when narrator speaks, rises to 15% during silent pauses
+        filter_complex = f"[0:v]{vf}[v];[1:a]volume=1.0[a1];[2:a]volume=0.15[a2];[a2][a1]sidechaincompress=threshold=0.08:ratio=4:attack=5:release=50[bgm_ducked];[a1][bgm_ducked]amix=inputs=2:duration=first:dropout_transition=2[a]"
         maps = ["-map", "[v]", "-map", "[a]"]
     else:
         filter_complex = f"[0:v]{vf}[v]"
@@ -634,7 +589,6 @@ def youtube_client():
 def upload_video(
     yt, file_path: Path, title: str, description: str, tags: list[str], category_id: str = "27",
 ) -> str:
-    # 27 = Education (good for History/Mystery), 22 = People & Blogs as fallback
     body = {
         "snippet": {
             "title": title[:100],
@@ -662,59 +616,50 @@ def main() -> int:
     state = load_state()
 
     target_minutes = float(cfg.get("target_minutes", 8.0))
-    voice = cfg.get("voice", "en-US-AndrewMultilingualNeural")
+    voice = cfg.get("voice", "en-GB-RyanNeural") # Switched to a slightly deeper, grittier UK voice for mystery vibe
     pexels_key = os.environ["PEXELS_API_KEY"]
 
-    print("[1/8] Gathering mystery candidates from Reddit + Wikipedia...")
+    print("[1/8] Gathering mysteries like a YouTube Strategist...")
     candidates = gather_candidates(cfg)
-    print(f"      {len(candidates)} safe candidates")
     if not candidates:
         print("[error] no candidates", file=sys.stderr)
         return 1
 
-    print("[2/8] Picking topic with Gemini...")
+    print("[2/8] Finding a viral topic & angle...")
     picked = pick_topic(candidates, state.get("used_topics", []))
     print(f"      Chose: {picked['topic']}")
-    print(f"      Angle: {picked['angle']}")
 
-    print(f"[3/8] Writing ~{target_minutes}-min cinematic script...")
+    print(f"[3/8] Writing high-retention script...")
     script = write_script(picked, target_minutes)
     
-    # FIX APPLIED HERE: Safe lookup for narration
-    narration_text = script.get("narration", f"Today, we explore the mystery of {picked['topic']}.")
+    narration_text = script.get("narration", f"The eerie truth behind {picked['topic']}.")
     word_count = len(narration_text.split())
-    print(f"      {word_count} words ({word_count / 150:.1f} min @ 150 wpm)")
-    
-    # FIX APPLIED HERE: Safe lookup for title
-    print(f"      Title: {script.get('title', picked['topic'])}")
+    print(f"      {word_count} words ({word_count / 150:.1f} min)")
+    print(f"      Final Video Title: {script.get('title', picked['topic'])}")
 
-    # FIX APPLIED HERE: Deprecated UTC warning fixed
     run_dir = WORK / dt.datetime.now(dt.UTC).strftime("%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "script.txt").write_text(narration_text, encoding="utf-8")
 
-    print("[4/8] Synthesizing narration (edge-tts, slow storyteller pace)...")
+    print("[4/8] Synthesizing ominous narration...")
     narration_mp3 = run_dir / "narration.mp3"
     word_srt = run_dir / "words.srt"
     synth_narration(narration_text, voice, narration_mp3, word_srt)
     cues = parse_srt(word_srt)
     if not cues:
-        print("[error] TTS returned no word cues", file=sys.stderr)
         return 1
-    total_audio = cues[-1].end
-    print(f"      narration {total_audio:.1f}s, {len(cues)} word cues")
+    print(f"      Audio ready: {cues[-1].end:.1f}s")
 
-    print("[5/8] Chunking + getting Pexels queries...")
-    segments = chunk_into_segments(cues, target_seconds=cfg.get("segment_seconds", 10.0))
-    print(f"      {len(segments)} visual segments")
+    print("[5/8] Directing B-Roll Segments...")
+    segments = chunk_into_segments(cues, target_seconds=cfg.get("segment_seconds", 6.5))
     queries = queries_for_segments(segments)
 
-    print("[6/8] Downloading Pexels footage...")
+    print("[6/8] Sourcing cinematic clips...")
     footage_dir = run_dir / "footage"
     footage_dir.mkdir(exist_ok=True)
     raw_clips = gather_footage(segments, queries, pexels_key, footage_dir)
 
-    print("[7/8] Normalizing clips + assembling...")
+    print("[7/8] Applying color grading, audio ducking & assembling...")
     norm_dir = run_dir / "normalized"
     norm_dir.mkdir(exist_ok=True)
     norm_clips: list[Path] = []
@@ -725,31 +670,26 @@ def main() -> int:
     silent = run_dir / "silent.mp4"
     concat_normalized(norm_clips, silent)
 
-    print("      Building captions + final mux...")
     captions = run_dir / "captions.ass"
     build_caption_file(cues, captions)
 
     bgm = ROOT / "assets" / "bgm.mp3"
     final = run_dir / "final.mp4"
     mux_final(silent, narration_mp3, captions, bgm if bgm.exists() else None, final)
-    print(f"      final video: {final.stat().st_size / 1e6:.1f} MB")
 
     print("[8/8] Uploading to YouTube...")
     yt = youtube_client()
     
-    # Flattened f-string to prevent editor parsing bugs
-    desc_text = script.get('description', f"A documentary exploring {picked['topic']}")
-    description = f"{desc_text}\n\nSource material: {picked['source_url']}\n"
+    desc_text = script.get('description', f"A deep dive into {picked['topic']}")
+    description = f"{desc_text}\n\nSources used in research: {picked['source_url']}\n"
     
-    # FIX APPLIED HERE: Safe lookup for title and tags during upload
     vid_id = upload_video(
         yt, final,
         title=script.get("title", picked["topic"])[:100],
         description=description,
-        tags=script.get("tags", ["mystery", "documentary", "history"]),
+        tags=script.get("tags", ["documentary", "mystery", "unexplained", "creepy"]),
     )
-    url = f"https://youtu.be/{vid_id}"
-    print(f"      uploaded -> {url}")
+    print(f"      Live -> https://youtu.be/{vid_id}")
 
     used = state.get("used_topics", [])
     used.append(picked["topic"])
