@@ -228,7 +228,7 @@ def _gemini() -> genai.Client:
 
 def _gemini_json(prompt: str, *, temperature: float = 0.6) -> dict | list:
     resp = _gemini().models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         contents=prompt,
         config=genai_types.GenerateContentConfig(
             response_mime_type="application/json",
