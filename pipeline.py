@@ -215,8 +215,14 @@ def gather_candidates(cfg: dict) -> list[TopicCandidate]:
 
 # ----------------------------- gemini helpers -----------------------------
 
+# FIX: Kept the Gemini client alive globally so httpx doesn't close the connection
+_GEMINI_CLIENT = None
+
 def _gemini():
-    return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is None:
+        _GEMINI_CLIENT = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    return _GEMINI_CLIENT
 
 def _gemini_json(prompt: str, *, temperature: float = 0.6) -> dict | list:
     resp = _gemini().models.generate_content(
