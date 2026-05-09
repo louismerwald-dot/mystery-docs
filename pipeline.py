@@ -344,14 +344,16 @@ def write_script(picked: dict, target_minutes: float) -> dict:
 # ----------------------------- TTS -----------------------------
 
 async def _synth_async(text: str, voice: str, out_path: Path, srt_path: Path) -> None:
-    # Slightly slower than default for storyteller pacing
-    communicate = edge_tts.Communicate(text, voice, rate="-5%")
+    # Slightly slower than default for storyteller pacing.
+    # FIX APPLIED: Request explicit WordBoundaries.
+    communicate = edge_tts.Communicate(text, voice, rate="-5%", boundary="WordBoundary")
     submaker = edge_tts.SubMaker()
     with out_path.open("wb") as f:
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 f.write(chunk["data"])
-            elif chunk["type"] == "WordBoundary":
+            # FIX APPLIED: Accept both boundary types for total resilience.
+            elif chunk["type"] in ["WordBoundary", "SentenceBoundary"]:
                 submaker.feed(chunk)
     srt_path.write_text(submaker.get_srt(), encoding="utf-8")
 
@@ -698,7 +700,8 @@ def main() -> int:
     print(f"      {word_count} words ({word_count / 150:.1f} min @ 150 wpm)")
     print(f"      Title: {script['title']}")
 
-    run_dir = WORK / dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    # FIX APPLIED: Datetime Deprecation Warning
+    run_dir = WORK / dt.datetime.now(dt.UTC).strftime("%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "script.txt").write_text(narration_text, encoding="utf-8")
 
