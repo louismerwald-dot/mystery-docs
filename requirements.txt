@@ -1,0 +1,7 @@
+edge-tts>=7.2.0
+google-genai>=0.8.0
+google-api-python-client>=2.140
+google-auth>=2.30
+google-auth-oauthlib>=1.2
+PyYAML>=6.0
+requests>=2.31

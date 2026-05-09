@@ -1,0 +1,29 @@
+# mystery-docs config
+
+# Target narration length in minutes. 7-9 is the YouTube algorithm sweet spot
+# for mystery/history channels. Longer than tech because audience watches longer.
+target_minutes: 8.0
+
+# edge-tts voice. Andrew = deep, calm, storyteller. Best for mysteries.
+# Other strong options for this niche:
+#   en-US-BrianMultilingualNeural   (similar but slightly warmer)
+#   en-GB-RyanNeural                (British, "Lemmino"-adjacent)
+#   en-GB-ThomasNeural              (deeper British, oldest-sounding)
+#   en-US-DavisNeural               (calm, measured)
+voice: "en-US-AndrewMultilingualNeural"
+
+# Average length of each visual stock clip in seconds.
+# Mysteries breathe slower - 9-12 seconds works well.
+segment_seconds: 10.0
+
+# Wikipedia categories scanned for evergreen mystery topics.
+# Each contains 50-200+ articles, gives you years of content.
+wikipedia_categories:
+  - Unexplained_phenomena
+  - Mysteries
+  - Lost_cities
+  - Cryptids
+  - Unsolved_problems_in_archaeology
+  - Hoaxes
+  - Out-of-place_artifacts
+  - Anomalous_phenomena
