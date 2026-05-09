@@ -215,16 +215,8 @@ def gather_candidates(cfg: dict) -> list[TopicCandidate]:
 
 # ----------------------------- gemini helpers -----------------------------
 
-# Single Gemini client kept alive for the whole run.
-# Creating a new one per call leaks/closes the underlying httpx client and
-# causes "Cannot send a request, as the client has been closed." errors.
-_GEMINI_CLIENT: genai.Client | None = None
-
-def _gemini() -> genai.Client:
-    global _GEMINI_CLIENT
-    if _GEMINI_CLIENT is None:
-        _GEMINI_CLIENT = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    return _GEMINI_CLIENT
+def _gemini():
+    return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 def _gemini_json(prompt: str, *, temperature: float = 0.6) -> dict | list:
     resp = _gemini().models.generate_content(
@@ -345,14 +337,14 @@ def write_script(picked: dict, target_minutes: float) -> dict:
 
 async def _synth_async(text: str, voice: str, out_path: Path, srt_path: Path) -> None:
     # Slightly slower than default for storyteller pacing.
-    # FIX APPLIED: Request explicit WordBoundaries.
+    # FIX APPLIED HERE: Request explicit WordBoundaries.
     communicate = edge_tts.Communicate(text, voice, rate="-5%", boundary="WordBoundary")
     submaker = edge_tts.SubMaker()
     with out_path.open("wb") as f:
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 f.write(chunk["data"])
-            # FIX APPLIED: Accept both boundary types for total resilience.
+            # FIX APPLIED HERE: Accept both boundary types for total resilience.
             elif chunk["type"] in ["WordBoundary", "SentenceBoundary"]:
                 submaker.feed(chunk)
     srt_path.write_text(submaker.get_srt(), encoding="utf-8")
@@ -700,7 +692,7 @@ def main() -> int:
     print(f"      {word_count} words ({word_count / 150:.1f} min @ 150 wpm)")
     print(f"      Title: {script['title']}")
 
-    # FIX APPLIED: Datetime Deprecation Warning
+    # FIX APPLIED HERE: Deprecated UTC warning fixed
     run_dir = WORK / dt.datetime.now(dt.UTC).strftime("%Y%m%d_%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "script.txt").write_text(narration_text, encoding="utf-8")
