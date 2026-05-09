@@ -215,8 +215,16 @@ def gather_candidates(cfg: dict) -> list[TopicCandidate]:
 
 # ----------------------------- gemini helpers -----------------------------
 
-def _gemini():
-    return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+# Single Gemini client kept alive for the whole run.
+# Creating a new one per call leaks/closes the underlying httpx client and
+# causes "Cannot send a request, as the client has been closed." errors.
+_GEMINI_CLIENT: genai.Client | None = None
+
+def _gemini() -> genai.Client:
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is None:
+        _GEMINI_CLIENT = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    return _GEMINI_CLIENT
 
 def _gemini_json(prompt: str, *, temperature: float = 0.6) -> dict | list:
     resp = _gemini().models.generate_content(
