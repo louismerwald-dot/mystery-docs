@@ -416,31 +416,32 @@ def chunk_into_segments(cues: list[Cue], target_seconds: float = 10.0) -> list[C
 
 # ----------------------------- Pexels footage -----------------------------
 
-QUERY_PROMPT = """For each segment of a mystery documentary narration, return a short stock-footage search query (2-4 words) that visually matches the MOOD and TOPIC.
+QUERY_PROMPT = """You are a documentary film director selecting B-roll stock footage for a mystery video.
+For each segment of the narration, provide a primary search query AND a fallback query.
 
-Bias toward atmospheric, cinematic, slightly ominous footage. Examples of good queries:
-  "foggy forest path", "ocean storm waves", "ancient ruins", "candlelight darkness",
-  "abandoned building", "snowy mountain peak", "old paper documents", "dark cave entrance",
-  "moonlit night sky", "deep ocean underwater", "ancient stone carvings", "rain on window",
-  "empty corridor", "library old books", "lone figure walking", "remote cabin", "cliff edge mist"
+Rules for queries (2-4 words max):
+1. Be specific and literal to the subject matter when possible (e.g., "vintage newspaper", "police tape", "hoof prints", "old wooden ship", "compass on map").
+2. Only use atmospheric queries (e.g., "foggy pine trees", "stormy ocean cliff") if the segment is purely about mood.
+3. NEVER search for proper nouns or specific people (Pexels doesn't have "Abraham Lincoln" or "Dyatlov Pass"). Translate proper nouns into generic equivalents (e.g., "19th century man", "snowy mountain camp").
+4. The fallback query should be a slightly broader version of the primary query.
 
-If the segment mentions a specific place/era (Egypt, Roman, medieval, jungle, arctic), use that.
-Avoid bright/cheerful queries. This is mystery content - we want shadows, fog, isolation.
+Return STRICT JSON matching this structure exactly:
+{{"segments": [
+  {{"primary": "snowy mountain camp", "fallback": "winter blizzard"}},
+  {{"primary": "vintage newspaper", "fallback": "old paper documents"}}
+]}}
 
-Return STRICT JSON:
-{{"queries": ["<query for segment 0>", ...]}}
-
-Segments:
+Narration Segments:
 {segments}
 """
 
-def queries_for_segments(segments: list[Cue]) -> list[str]:
+def queries_for_segments(segments: list[Cue]) -> list[dict]:
     seg_lines = [f"{i}: {s.text}" for i, s in enumerate(segments)]
     prompt = QUERY_PROMPT.format(segments="\n".join(seg_lines))
     data = _gemini_json(prompt, temperature=0.5)
-    qs = data.get("queries", [])
+    qs = data.get("segments", [])
     while len(qs) < len(segments):
-        qs.append("foggy forest")
+        qs.append({"primary": "dark foggy forest", "fallback": "night sky moon"})
     return qs[:len(segments)]
 
 PEXELS_FALLBACKS = [
@@ -457,7 +458,7 @@ def pexels_video_for_query(query: str, min_duration: float, key: str) -> str | N
         if resp.status_code != 200:
             return None
         videos = resp.json().get("videos", [])
-        random.shuffle(videos)
+        # FIX: Removed random shuffle to prioritize the MOST relevant result first
         for v in videos:
             if v.get("duration", 0) < min_duration:
                 continue
@@ -490,20 +491,26 @@ def download_clip(url: str, dest: Path) -> bool:
         return False
 
 def gather_footage(
-    segments: list[Cue], queries: list[str], pexels_key: str, footage_dir: Path
+    segments: list[Cue], queries: list[dict], pexels_key: str, footage_dir: Path
 ) -> list[Path]:
     paths: list[Path] = []
     used_urls: set[str] = set()
-    for i, (seg, query) in enumerate(zip(segments, queries)):
+    for i, (seg, query_dict) in enumerate(zip(segments, queries)):
         duration = max(2.0, seg.end - seg.start)
         clip_path = footage_dir / f"seg_{i:03d}.mp4"
         url: str | None = None
-        for q in [query] + PEXELS_FALLBACKS:
+        
+        # Try Primary, then AI Fallback, then Global Fallbacks
+        search_list = [query_dict.get("primary", ""), query_dict.get("fallback", "")] + PEXELS_FALLBACKS
+        search_list = [q for q in search_list if q] # Remove empty strings
+        
+        for q in search_list:
             cand = pexels_video_for_query(q, duration, pexels_key)
             if cand and cand not in used_urls:
                 url = cand
                 used_urls.add(cand)
                 break
+                
         if not url:
             if paths:
                 shutil.copy(paths[-1], clip_path)
@@ -511,14 +518,17 @@ def gather_footage(
                 print(f"    [{i}] no fresh clip; reused previous", file=sys.stderr)
                 continue
             raise RuntimeError(f"No Pexels footage available for segment {i}")
+            
         if not download_clip(url, clip_path):
             if paths:
                 shutil.copy(paths[-1], clip_path)
                 paths.append(clip_path)
                 continue
             raise RuntimeError(f"Failed to download Pexels clip for segment {i}")
+            
         paths.append(clip_path)
-        print(f"    [{i+1}/{len(segments)}] '{query}' -> {clip_path.name}")
+        print(f"    [{i+1}/{len(segments)}] '{search_list[0]}' -> {clip_path.name}")
+        
     return paths
 
 # ----------------------------- captions (ASS) -----------------------------
@@ -608,173 +618,4 @@ def mux_final(
         # narration loud + bgm at 8% (ominous tracks need to sit lower)
         filter_complex = (
             f"[0:v]{vf}[v];"
-            f"[1:a]volume=1.0[a1];"
-            f"[2:a]volume=0.08[a2];"
-            f"[a1][a2]amix=inputs=2:duration=first:dropout_transition=2[a]"
-        )
-        maps = ["-map", "[v]", "-map", "[a]"]
-    else:
-        filter_complex = f"[0:v]{vf}[v]"
-        maps = ["-map", "[v]", "-map", "1:a"]
-
-    cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
-        *inputs,
-        "-filter_complex", filter_complex,
-        *maps,
-        "-shortest",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "192k",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
-        str(dst),
-    ]
-    subprocess.run(cmd, check=True)
-
-# ----------------------------- youtube upload -----------------------------
-
-def youtube_client():
-    creds = Credentials(
-        token=None,
-        refresh_token=os.environ["YT_REFRESH_TOKEN"],
-        client_id=os.environ["YT_CLIENT_ID"],
-        client_secret=os.environ["YT_CLIENT_SECRET"],
-        token_uri="https://oauth2.googleapis.com/token",
-        scopes=["https://www.googleapis.com/auth/youtube.upload"],
-    )
-    creds.refresh(GoogleAuthRequest())
-    return build("youtube", "v3", credentials=creds)
-
-def upload_video(
-    yt, file_path: Path, title: str, description: str, tags: list[str], category_id: str = "27",
-) -> str:
-    # 27 = Education (good for History/Mystery), 22 = People & Blogs as fallback
-    body = {
-        "snippet": {
-            "title": title[:100],
-            "description": description[:4900],
-            "tags": [t.lower()[:30] for t in tags][:15],
-            "categoryId": category_id,
-        },
-        "status": {
-            "privacyStatus": "public",
-            "selfDeclaredMadeForKids": False,
-        },
-    }
-    media = MediaFileUpload(str(file_path), mimetype="video/mp4", resumable=True)
-    req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
-    response = None
-    while response is None:
-        _status, response = req.next_chunk()
-    return response["id"]
-
-# ----------------------------- driver -----------------------------
-
-def main() -> int:
-    WORK.mkdir(exist_ok=True)
-    cfg = load_config()
-    state = load_state()
-
-    target_minutes = float(cfg.get("target_minutes", 8.0))
-    voice = cfg.get("voice", "en-US-AndrewMultilingualNeural")
-    pexels_key = os.environ["PEXELS_API_KEY"]
-
-    print("[1/8] Gathering mystery candidates from Reddit + Wikipedia...")
-    candidates = gather_candidates(cfg)
-    print(f"      {len(candidates)} safe candidates")
-    if not candidates:
-        print("[error] no candidates", file=sys.stderr)
-        return 1
-
-    print("[2/8] Picking topic with Gemini...")
-    picked = pick_topic(candidates, state.get("used_topics", []))
-    print(f"      Chose: {picked['topic']}")
-    print(f"      Angle: {picked['angle']}")
-
-    print(f"[3/8] Writing ~{target_minutes}-min cinematic script...")
-    script = write_script(picked, target_minutes)
-    
-    # FIX APPLIED HERE: Safe lookup for narration
-    narration_text = script.get("narration", f"Today, we explore the mystery of {picked['topic']}.")
-    word_count = len(narration_text.split())
-    print(f"      {word_count} words ({word_count / 150:.1f} min @ 150 wpm)")
-    
-    # FIX APPLIED HERE: Safe lookup for title
-    print(f"      Title: {script.get('title', picked['topic'])}")
-
-    # FIX APPLIED HERE: Deprecated UTC warning fixed
-    run_dir = WORK / dt.datetime.now(dt.UTC).strftime("%Y%m%d_%H%M%S")
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "script.txt").write_text(narration_text, encoding="utf-8")
-
-    print("[4/8] Synthesizing narration (edge-tts, slow storyteller pace)...")
-    narration_mp3 = run_dir / "narration.mp3"
-    word_srt = run_dir / "words.srt"
-    synth_narration(narration_text, voice, narration_mp3, word_srt)
-    cues = parse_srt(word_srt)
-    if not cues:
-        print("[error] TTS returned no word cues", file=sys.stderr)
-        return 1
-    total_audio = cues[-1].end
-    print(f"      narration {total_audio:.1f}s, {len(cues)} word cues")
-
-    print("[5/8] Chunking + getting Pexels queries...")
-    segments = chunk_into_segments(cues, target_seconds=cfg.get("segment_seconds", 10.0))
-    print(f"      {len(segments)} visual segments")
-    queries = queries_for_segments(segments)
-
-    print("[6/8] Downloading Pexels footage...")
-    footage_dir = run_dir / "footage"
-    footage_dir.mkdir(exist_ok=True)
-    raw_clips = gather_footage(segments, queries, pexels_key, footage_dir)
-
-    print("[7/8] Normalizing clips + assembling...")
-    norm_dir = run_dir / "normalized"
-    norm_dir.mkdir(exist_ok=True)
-    norm_clips: list[Path] = []
-    for i, (clip, seg) in enumerate(zip(raw_clips, segments)):
-        norm = norm_dir / f"n_{i:03d}.mp4"
-        normalize_clip(clip, norm, seg.end - seg.start)
-        norm_clips.append(norm)
-    silent = run_dir / "silent.mp4"
-    concat_normalized(norm_clips, silent)
-
-    print("      Building captions + final mux...")
-    captions = run_dir / "captions.ass"
-    build_caption_file(cues, captions)
-
-    bgm = ROOT / "assets" / "bgm.mp3"
-    final = run_dir / "final.mp4"
-    mux_final(silent, narration_mp3, captions, bgm if bgm.exists() else None, final)
-    print(f"      final video: {final.stat().st_size / 1e6:.1f} MB")
-
-    print("[8/8] Uploading to YouTube...")
-    yt = youtube_client()
-    
-    # FIX APPLIED HERE: Safe lookup for description
-    description = (
-        f"{script.get('description', 'A documentary exploring ' + picked['topic'])}\n\n"
-        f"Source material: {picked['source_url']}\n"
-    )
-    
-    # FIX APPLIED HERE: Safe lookup for title and tags during upload
-    vid_id = upload_video(
-        yt, final,
-        title=script.get("title", picked["topic"])[:100],
-        description=description,
-        tags=script.get("tags", ["mystery", "documentary", "history"]),
-    )
-    url = f"https://youtu.be/{vid_id}"
-    print(f"      uploaded -> {url}")
-
-    used = state.get("used_topics", [])
-    used.append(picked["topic"])
-    state["used_topics"] = used[-200:]
-    save_state(state)
-
-    shutil.rmtree(run_dir, ignore_errors=True)
-    print("[done]")
-    return 0
-
-if __name__ == "__main__":
-    sys.exit(main())
+            f"
